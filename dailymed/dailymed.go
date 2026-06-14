@@ -163,7 +163,7 @@ func (c *Client) ListNDCs(ctx context.Context, setid string, limit int) ([]NDC, 
 	}
 	out := make([]NDC, 0, len(resp.Data.NDCs))
 	for _, e := range resp.Data.NDCs {
-		out = append(out, NDC{NDC: e.NDC})
+		out = append(out, NDC(e))
 		if limit > 0 && len(out) >= limit {
 			break
 		}

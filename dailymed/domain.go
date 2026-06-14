@@ -58,13 +58,13 @@ func (Domain) Register(app *kit.App) {
 
 	// spl: get a single SPL by setid.
 	kit.Handle(app, kit.OpMeta{
-		Name:    "spl",
-		Group:   "read",
-		Single:  true,
-		Summary: "Get a drug label (SPL) by setid",
-		URIType: "spl",
+		Name:     "spl",
+		Group:    "read",
+		Single:   true,
+		Summary:  "Get a drug label (SPL) by setid",
+		URIType:  "spl",
 		Resolver: true,
-		Args:    []kit.Arg{{Name: "setid", Help: "SPL setid (UUID)"}},
+		Args:     []kit.Arg{{Name: "setid", Help: "SPL setid (UUID)"}},
 	}, getSPL)
 
 	// ndcs: list NDC codes for a drug label.
