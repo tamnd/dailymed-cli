@@ -1,0 +1,10 @@
+title       = "dailymed"
+baseURL     = "https://dailymed-cli.tamnd.com/"
+description = "Fetch FDA drug label (SPL) data from DailyMed"
+contentDir  = "content"
+outputDir   = "public"
+theme       = "tago-doks"
+syntaxHighlight = "true"
+
+[params]
+github = "https://github.com/tamnd/dailymed-cli"
