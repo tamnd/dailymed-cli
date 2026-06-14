@@ -7,8 +7,8 @@ import (
 )
 
 // These tests are offline: they exercise the URI driver's pure string functions
-// and the host wiring (mint, body, resolve), which need no network. The client's
-// HTTP behaviour is covered in dailymed_test.go.
+// and the host wiring, which need no network. The client's HTTP behaviour is
+// covered in dailymed_test.go.
 
 func TestDomainInfo(t *testing.T) {
 	info := Domain{}.Info()
@@ -24,10 +24,10 @@ func TestDomainInfo(t *testing.T) {
 }
 
 func TestClassify(t *testing.T) {
+	const setid = "a0040a07-4cd5-4a80-b7b2-3a5fe75e2e5e"
 	cases := []struct{ in, typ, id string }{
-		{"wiki/Go", "page", "wiki/Go"},
-		{"/about/", "page", "about"},
-		{"https://" + Host + "/team/contact", "page", "team/contact"},
+		{setid, "spl", setid},
+		{"  " + setid + "  ", "spl", setid},
 	}
 	for _, tc := range cases {
 		typ, id, err := Domain{}.Classify(tc.in)
@@ -38,39 +38,50 @@ func TestClassify(t *testing.T) {
 	}
 }
 
+func TestClassifyEmpty(t *testing.T) {
+	_, _, err := Domain{}.Classify("")
+	if err == nil {
+		t.Error("Classify(\"\") should return an error")
+	}
+}
+
 func TestLocate(t *testing.T) {
-	got, err := Domain{}.Locate("page", "wiki/Go")
-	want := "https://" + Host + "/wiki/Go"
+	const setid = "a0040a07-4cd5-4a80-b7b2-3a5fe75e2e5e"
+	got, err := Domain{}.Locate("spl", setid)
+	want := "https://" + Host + "/dailymed/drugInfo.cfm?setid=" + setid
 	if err != nil || got != want {
 		t.Errorf("Locate = (%q, %v), want (%q, nil)", got, err, want)
 	}
 }
 
-// TestHostWiring mounts the driver in a kit Host (the runtime ant drives) and
-// checks the round trip: a record mints to its URI, its body is readable, and a
-// bare id resolves back to the same URI. The init in domain.go registers the
-// domain, so kit.Open finds it.
+func TestLocateUnknownType(t *testing.T) {
+	_, err := Domain{}.Locate("unknown", "foo")
+	if err == nil {
+		t.Error("Locate with unknown type should return an error")
+	}
+}
+
+// TestHostWiring mounts the driver in a kit Host and checks that Mint and
+// ResolveOn work correctly. The init in domain.go registers the domain.
 func TestHostWiring(t *testing.T) {
 	h, err := kit.Open()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	p := &Page{ID: "wiki/Go", URL: "https://" + Host + "/wiki/Go", Title: "Go", Body: "Go is a language."}
-	u, err := h.Mint(p)
+	const setid = "a0040a07-4cd5-4a80-b7b2-3a5fe75e2e5e"
+	s := &SPL{SetID: setid, Title: "Aspirin 81 mg", PublishedDate: "Jun 01, 2026"}
+	u, err := h.Mint(s)
 	if err != nil {
 		t.Fatalf("Mint: %v", err)
 	}
-	if want := "dailymed://page/wiki/Go"; u.String() != want {
+	want := "dailymed://spl/" + setid
+	if u.String() != want {
 		t.Errorf("Mint = %q, want %q", u.String(), want)
 	}
 
-	if body, ok := h.Body(p); !ok || body == "" {
-		t.Errorf("Body = (%q, %v), want non-empty", body, ok)
-	}
-
-	got, err := h.ResolveOn("dailymed", "about")
-	if err != nil || got.String() != "dailymed://page/about" {
-		t.Errorf("ResolveOn = (%q, %v), want dailymed://page/about", got.String(), err)
+	got, err := h.ResolveOn("dailymed", setid)
+	if err != nil || got.String() != "dailymed://spl/"+setid {
+		t.Errorf("ResolveOn = (%q, %v), want dailymed://spl/%s", got.String(), err, setid)
 	}
 }

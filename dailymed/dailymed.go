@@ -1,35 +1,88 @@
 // Package dailymed is the library behind the dailymed command line:
-// the HTTP client, request shaping, and the typed data models for dailymed.
+// the HTTP client, request shaping, and the typed data models for DailyMed.
 //
 // The Client here is the spine every command shares. It sets a real
 // User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// transient failures (429 and 5xx) that any public API throws under load.
 package dailymed
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
-	"regexp"
+	"net/url"
 	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to dailymed. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "dailymed/dev (+https://github.com/tamnd/dailymed-cli)"
-
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at dailymed.nlm.nih.gov; change it once you
-// know the real endpoints you want to read.
+// Host is the site this client talks to.
 const Host = "dailymed.nlm.nih.gov"
 
 // BaseURL is the root every request is built from.
 const BaseURL = "https://" + Host
 
-// Client talks to dailymed over HTTP.
+// DefaultUserAgent identifies the client to DailyMed in a transparent, polite way.
+const DefaultUserAgent = "dailymed-cli/0.1 (tamnd87@gmail.com)"
+
+// DefaultRate is the minimum gap between requests.
+const DefaultRate = 300 * time.Millisecond
+
+// DefaultTimeout is the per-request HTTP timeout.
+const DefaultTimeout = 15 * time.Second
+
+// DefaultRetries is the number of retry attempts on transient errors.
+const DefaultRetries = 3
+
+// SPL represents a single Structured Product Label (drug label) record.
+type SPL struct {
+	SetID         string `kit:"id" json:"setid"`
+	Title         string `json:"title"`
+	PublishedDate string `json:"published_date"`
+}
+
+// NDC represents a National Drug Code record associated with an SPL.
+type NDC struct {
+	NDC string `kit:"id" json:"ndc"`
+}
+
+// wire types for JSON decoding
+
+type splListResp struct {
+	Data []SPL `json:"data"`
+}
+
+// packagingDataWire is the wrapper returned by the packaging.json endpoint.
+// The `data` field is an object (not an array), so we decode it into this struct.
+type packagingDataWire struct {
+	SetID         string `json:"setid"`
+	Title         string `json:"title"`
+	PublishedDate string `json:"published_date"`
+}
+
+type packagingResp struct {
+	Data packagingDataWire `json:"data"`
+}
+
+// ndcEntry is one element in the ndcs array returned by ndcs.json.
+type ndcEntry struct {
+	NDC string `json:"ndc"`
+}
+
+// ndcDataWire is the `data` object returned by ndcs.json.
+type ndcDataWire struct {
+	SetID         string     `json:"setid"`
+	Title         string     `json:"title"`
+	PublishedDate string     `json:"published_date"`
+	NDCs          []ndcEntry `json:"ndcs"`
+}
+
+type ndcResp struct {
+	Data ndcDataWire `json:"data"`
+}
+
+// Client talks to the DailyMed public API over HTTPS.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
@@ -40,21 +93,87 @@ type Client struct {
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with the sensible defaults.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
+		HTTP:      &http.Client{Timeout: DefaultTimeout},
 		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		Rate:      DefaultRate,
+		Retries:   DefaultRetries,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
-func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
+// SearchSPLs searches DailyMed drug labels by drug name.
+// limit is the page size, page is 1-based.
+func (c *Client) SearchSPLs(ctx context.Context, query string, limit, page int) ([]SPL, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	if page <= 0 {
+		page = 1
+	}
+	u := BaseURL + "/dailymed/services/v2/spls.json?drug_name=" +
+		url.QueryEscape(query) +
+		fmt.Sprintf("&pagesize=%d&page=%d", limit, page)
+	body, err := c.Get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp splListResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode spls: %w", err)
+	}
+	return resp.Data, nil
+}
+
+// GetSPL fetches a single SPL record by its setid (UUID string).
+// It uses the packaging.json sub-endpoint which returns full SPL metadata.
+func (c *Client) GetSPL(ctx context.Context, setid string) (*SPL, error) {
+	u := BaseURL + "/dailymed/services/v2/spls/" + url.PathEscape(strings.TrimSpace(setid)) + "/packaging.json"
+	body, err := c.Get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp packagingResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode spl: %w", err)
+	}
+	d := resp.Data
+	if d.SetID == "" {
+		return nil, fmt.Errorf("spl %q not found", setid)
+	}
+	return &SPL{
+		SetID:         d.SetID,
+		Title:         d.Title,
+		PublishedDate: d.PublishedDate,
+	}, nil
+}
+
+// ListNDCs returns the NDC codes for the SPL identified by setid.
+// limit caps the result slice; zero means no cap.
+func (c *Client) ListNDCs(ctx context.Context, setid string, limit int) ([]NDC, error) {
+	u := BaseURL + "/dailymed/services/v2/spls/" + url.PathEscape(strings.TrimSpace(setid)) + "/ndcs.json"
+	body, err := c.Get(ctx, u)
+	if err != nil {
+		return nil, err
+	}
+	var resp ndcResp
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return nil, fmt.Errorf("decode ndcs: %w", err)
+	}
+	out := make([]NDC, 0, len(resp.Data.NDCs))
+	for _, e := range resp.Data.NDCs {
+		out = append(out, NDC{NDC: e.NDC})
+		if limit > 0 && len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
+}
+
+// Get fetches a URL and returns the response body. It paces and retries
+// according to the client's settings.
+func (c *Client) Get(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
 		if attempt > 0 {
@@ -64,7 +183,7 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			case <-time.After(backoff(attempt)):
 			}
 		}
-		body, retry, err := c.do(ctx, url)
+		body, retry, err := c.do(ctx, rawURL)
 		if err == nil {
 			return body, nil
 		}
@@ -73,12 +192,12 @@ func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 			return nil, err
 		}
 	}
-	return nil, fmt.Errorf("get %s: %w", url, lastErr)
+	return nil, fmt.Errorf("get %s: %w", rawURL, lastErr)
 }
 
-func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, err error) {
+func (c *Client) do(ctx context.Context, rawURL string) (body []byte, retry bool, err error) {
 	c.pace()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, false, err
 	}
@@ -121,80 +240,4 @@ func backoff(attempt int) time.Duration {
 		d = 5 * time.Second
 	}
 	return d
-}
-
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on dailymed.nlm.nih.gov. It is a stand-in for the typed records you
-// will model from the real dailymed endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `dailymed cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
-
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
-	body, err := c.Get(ctx, url)
-	if err != nil {
-		return nil, err
-	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
-	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
-	}
-	return out, nil
-}
-
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
-	}
-	return out
-}
-
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
-	}
-	return s
 }
